@@ -240,3 +240,30 @@ making lock-file cleanup explicit. Hardware evidence is in
 `artifacts/metadata/copies-refresh-live-service.log`; the fake CUPS trace is
 `artifacts/metadata/copies-fake-cups.log`. The user confirmed two identical
 physical test-pattern labels from the repaired PNG queue.
+
+## Ordinary application print dialog
+
+A one-page PDF fixture is available as `fixtures/dialog-12x40.pdf`, with source
+`fixtures/dialog-12x40.ps`. Regenerate with:
+
+```
+ps2pdf fixtures/dialog-12x40.ps fixtures/dialog-12x40.pdf
+papers fixtures/dialog-12x40.pdf
+```
+
+On this Ubuntu GNOME/Wayland desktop, Papers 50.2 opens the standard GNOME print
+portal. The queue appears as `Niimbot_D110M`. Select it, then in Page Setup choose
+`12×40mm.Borderless`, Portrait, 100% scale, and one page per side. Leave copies
+at 1 for the test. The PDF is 12×40 mm portrait; no fit-to-A4 scaling is needed.
+
+The fixture includes GUI TEST text, a border, feed-direction arrow, and different
+bottom markers. Verify all are visible on one label, with normal feed. Do not
+assume that selecting the queue automatically selects the intended media: the
+paper-size menu also offers A4/custom-size management on this system. Automated
+accessibility selection did not reliably commit the media choice, so that step
+was committed manually in the real dialog. The first application job reached
+the service as a 96×320 sGray raster with 12×40 mm media, but failed before
+printing with Host is down; an awake-printer retry is pending.
+The retry dialog retained the manually chosen 12×40 mm stock, portrait,
+100% scale, and one copy. It displayed the printer-offline warning matching
+the failed connection. The user was asked to power on the printer before retry.
