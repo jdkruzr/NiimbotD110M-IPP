@@ -7,10 +7,17 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <time.h>
+#include <errno.h>
+#include <sys/prctl.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+
+static char recovery_path[1024];
 
 typedef struct { FILE *file; unsigned rows, pages; bool failed; char dir[256]; } job_data;
 static bool start_job(pappl_job_t *j, pappl_pr_options_t *o, pappl_device_t *d) {
  (void)o;(void)d;
+ if(access(recovery_path,F_OK)==0){papplJobSetMessage(j,"Service previously exited unexpectedly; cancel old CUPS jobs and explicitly clear the recovery hold.");return false;}
  job_data *s=calloc(1,sizeof(*s)); if(!s)return false;
  snprintf(s->dir,sizeof(s->dir),"/tmp/niimbot-job-XXXXXX");
  if(!mkdtemp(s->dir)){free(s);return false;}
@@ -38,11 +45,31 @@ static bool end_job(pappl_job_t *j,pappl_pr_options_t *o,pappl_device_t *d) {
  (void)o;(void)d;job_data *s=papplJobGetData(j);
  if(!s)return false;
  bool ok=false;
- if(s && !s->failed && !papplJobIsCanceled(j)) {
+ if(!s->failed && !papplJobIsCanceled(j) && papplJobGetState(j)==IPP_JSTATE_PROCESSING) {
   char copies[16];snprintf(copies,sizeof(copies),"1"); /* PAPPL images/CUPS raster already expand copies. */
+  pid_t parent=getpid();
   pid_t pid=fork();
-  if(pid==0){execlp("python3","python3","ipp/supervise.py",s->dir,copies,(char*)NULL);_exit(127);}
-  if(pid>0){int status=0;time_t until=time(NULL)+35+30*s->pages*o->copies;bool stopping=false;time_t stop_at=0;while(waitpid(pid,&status,WNOHANG)==0){if(!stopping&&(papplJobIsCanceled(j)||time(NULL)>=until)){kill(pid,SIGTERM);stopping=true;stop_at=time(NULL)+5;}if(stopping&&time(NULL)>=stop_at)kill(pid,SIGKILL);usleep(100000);}ok=WIFEXITED(status)&&WEXITSTATUS(status)==0;}
+  if(pid==0){
+   if(prctl(PR_SET_PDEATHSIG,SIGTERM)<0 || getppid()!=parent)_exit(127);
+   execlp("python3","python3","ipp/supervise.py",s->dir,copies,(char*)NULL);_exit(127);
+  }
+  if(pid>0){
+   int status=0;bool reaped=false,stopping=false;
+   struct timespec now;clock_gettime(CLOCK_MONOTONIC,&now);
+   time_t until=now.tv_sec+35+30*s->pages,stop_at=0;
+   while(true){
+    pid_t result=waitpid(pid,&status,WNOHANG);
+    if(result==pid){reaped=true;break;}
+    if(result<0){if(errno==EINTR)continue;break;}
+    clock_gettime(CLOCK_MONOTONIC,&now);
+    if(!stopping&&(papplJobIsCanceled(j)||now.tv_sec>=until)){
+     kill(pid,SIGTERM);stopping=true;stop_at=now.tv_sec+5;
+    }
+    if(stopping&&now.tv_sec>=stop_at)kill(pid,SIGKILL);
+    usleep(100000);
+   }
+   ok=reaped&&!stopping&&!papplJobIsCanceled(j)&&WIFEXITED(status)&&WEXITSTATUS(status)==0;
+  }
  }
  if(!ok){
  char error_path[300],message[512]="Job failed or cancelled; output may be partial. Check service log before explicitly resubmitting.";
@@ -80,5 +107,17 @@ int main(void) {
  pappl_printer_t *p=papplPrinterCreate(s,1,"Niimbot D110M", "niimbot-d110m",NULL,"niimbot://configured");
  if(!p)return 1;
  papplPrinterSetDNSSDName(p,NULL);papplSystemSetDNSSDName(s,NULL);
- papplSystemRun(s);papplSystemDelete(s);return 0;
+ char active_path[1024];
+ if(snprintf(active_path,sizeof(active_path),"%s/service-active",spool)>=(int)sizeof(active_path) ||
+    snprintf(recovery_path,sizeof(recovery_path),"%s/recovery-required",spool)>=(int)sizeof(recovery_path))return 1;
+ int marker=open(active_path,O_WRONLY|O_CREAT|O_EXCL,0600);
+ if(marker<0){
+  if(errno!=EEXIST)return 1;
+  int hold=open(recovery_path,O_WRONLY|O_CREAT,0600);if(hold<0)return 1;
+  if(fsync(hold)<0){close(hold);return 1;}close(hold);
+ }else{if(fsync(marker)<0){close(marker);return 1;}close(marker);}
+ int directory=open(spool,O_DIRECTORY);if(directory<0)return 1;
+ if(fsync(directory)<0){close(directory);return 1;}
+ papplSystemRun(s);papplSystemDelete(s);
+ unlink(active_path);fsync(directory);close(directory);return 0;
 }

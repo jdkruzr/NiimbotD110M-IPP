@@ -21,9 +21,15 @@ async function main() {
   pages.push({encoded:await ImageEncoder.encodeImage(sharp(bytes,{raw:{width:96,height:320,channels:1}}),PageColorType.SingleColor,'top'),quantity:1});
  }
  if (process.env.NIIMBOT_FAKE === '1') {
+  const scenario=process.env.NIIMBOT_FAKE_SCENARIO || 'success';
   emit('connected',{simulated:true});
+  if(scenario==='offline') throw Error('Simulated connection failure');
+  emit('transmitting',{simulated:true});
+  if(scenario==='stall') await new Promise(()=>setInterval(()=>{},1000));
+  if(scenario==='link-loss') { emit('progress',{confirmedPages:0}); throw Error('Simulated link loss'); }
   pages.forEach((_,i)=>emit('progress',{confirmedPages:i+1}));
-  emit('completed',{confirmedPages:pages.length,simulated:true});return;
+  if(scenario!=='missing-completion') emit('completed',{confirmedPages:pages.length,simulated:true});
+  return;
  }
  const client=initClient('serial',process.argv[3],false);
  try {

@@ -50,11 +50,11 @@ def main():
         s.connect((a.address, a.channel))
         master, slave = pty.openpty()
         tty.setraw(slave)
-        command = ['node', str(root/'research/niimblue-node/cli.mjs'), *a.cli,
+        command = [os.environ.get('NIIMBOT_NODE', 'node'), str(root/'research/niimblue-node/cli.mjs'), *a.cli,
                    '-t', 'serial', '-a', os.ttyname(slave)]
         if a.cli[0] == 'worker':
-            command = ['node', str(root/'ipp/worker.cjs'), a.cli[1], os.ttyname(slave)]
-        child = subprocess.Popen(command)
+            command = [os.environ.get('NIIMBOT_NODE', 'node'), str(root/'ipp/worker.cjs'), a.cli[1], os.ttyname(slave)]
+        child = subprocess.Popen(['python3', str(root/'scripts/process_guard.py'), str(os.getpid()), *command])
         until = time.monotonic() + a.deadline
         while child.poll() is None:
             if time.monotonic() >= until:
