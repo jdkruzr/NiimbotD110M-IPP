@@ -92,7 +92,7 @@ if __name__ == '__main__':
         raise SystemExit(main())
     except (OSError, TimeoutError, ConnectionError) as error:
         if 'worker' in sys.argv:
-            print(json.dumps({'version': 1, 'type': 'error', 'message': str(error)}), flush=True)
+            print(json.dumps({'version': 1, 'type': 'error', 'message': str(error), 'category': 'offline' if getattr(error, 'errno', None) in (110,111,112,113) else 'link'}), flush=True)
         else:
             print(str(error), file=sys.stderr)
         raise SystemExit(1)

@@ -66,6 +66,7 @@ STATUS successful-ok
     def test_cancel_active_ipp_job(self):
         self.submit()
         self.wait_for(lambda:any(json.loads(p.read_text())['state']=='transmitting' for p in self.journals()))
+        self.ipp('Get-Job-Attributes','ATTR integer job-id 1','EXPECT job-impressions-completed WITH-VALUE 0')
         self.ipp('Cancel-Job','ATTR integer job-id 1')
         self.wait_for(lambda:any(json.loads(p.read_text())['state']=='uncertain' for p in self.journals()))
         self.ipp('Get-Job-Attributes','ATTR integer job-id 1','EXPECT job-state WITH-VALUE 7 REPEAT-NO-MATCH REPEAT-LIMIT 5')
@@ -92,5 +93,31 @@ STATUS successful-ok
         self.ipp('Get-Job-Attributes','ATTR integer job-id 1','EXPECT job-state WITH-VALUE 8')
         self.assertTrue((self.base/'recovery-required').exists())
         self.assertEqual(before,{p.name:p.read_text() for p in self.journals()})
+
+    def configure_scenario(self, scenario):
+        self.service.terminate();self.service.wait(timeout=5)
+        self.scenario_file=self.base/'scenario'
+        self.scenario_file.write_text(scenario)
+        self.env['NIIMBOT_FAKE_SCENARIO_FILE']=str(self.scenario_file)
+        self.start()
+
+    def test_physical_progress_survives_partial_failure(self):
+        self.configure_scenario('partial-link')
+        self.ipp('Print-Job','ATTR mimeMediaType document-format image/png\nGROUP job-attributes-tag\nATTR integer copies 2\nFILE $filename')
+        self.ipp('Get-Job-Attributes','ATTR integer job-id 1','EXPECT job-state WITH-VALUE 8 REPEAT-NO-MATCH REPEAT-LIMIT 5\nEXPECT job-impressions-completed WITH-VALUE 1')
+        self.ipp('Get-Printer-Attributes',expect='EXPECT printer-state-reasons WITH-VALUE offline')
+
+    def test_cover_error_is_visible_in_ipp(self):
+        self.configure_scenario('cover');self.submit()
+        self.ipp('Get-Job-Attributes','ATTR integer job-id 1','EXPECT job-state WITH-VALUE 8 REPEAT-NO-MATCH REPEAT-LIMIT 5\nEXPECT job-impressions-completed WITH-VALUE 0\nEXPECT job-state-message WITH-VALUE /lid/')
+        self.ipp('Get-Printer-Attributes',expect='EXPECT printer-state-reasons WITH-VALUE cover-open')
+
+    def test_offline_reason_clears_after_success(self):
+        self.configure_scenario('offline');self.submit()
+        self.ipp('Get-Job-Attributes','ATTR integer job-id 1','EXPECT job-state WITH-VALUE 8 REPEAT-NO-MATCH REPEAT-LIMIT 5\nEXPECT job-impressions-completed WITH-VALUE 0')
+        self.ipp('Get-Printer-Attributes',expect='EXPECT printer-state-reasons WITH-VALUE offline')
+        self.scenario_file.write_text('success');self.submit()
+        self.ipp('Get-Job-Attributes','ATTR integer job-id 2','EXPECT job-state WITH-VALUE 9 REPEAT-NO-MATCH REPEAT-LIMIT 5\nEXPECT job-impressions-completed WITH-VALUE 1')
+        self.ipp('Get-Printer-Attributes',expect='EXPECT printer-state-reasons WITH-VALUE none')
 
 if __name__=='__main__':unittest.main()

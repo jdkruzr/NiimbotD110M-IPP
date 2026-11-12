@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+from status import error_status, publish
 
 ROOT = Path(__file__).resolve().parent.parent
 UNCERTAIN = {'starting', 'transmitting', 'uncertain'}
@@ -114,6 +115,7 @@ def main():
         atomic_json(journal, {'state': status, 'time': time.time(), 'confirmedPages': confirmed,
                               'expectedPages': len(pages), 'simulated': fake})
 
+    publish(folder, 0, 0, 'Connecting to printer; no labels confirmed.')
     record('starting')
     try:
         if cancelled:
@@ -147,23 +149,40 @@ def main():
                     if kind == 'transmitting':
                         transmitted = True
                         record('transmitting')
+                        publish(folder, confirmed, 0, f'Printing: {confirmed}/{len(pages)} labels confirmed.')
                     elif kind in ('progress', 'completed'):
                         count = event.get('confirmedPages')
                         if type(count) is not int or not confirmed <= count <= len(pages):
                             raise RuntimeError('Invalid physical page count')
                         confirmed = count
+                        record('transmitting')
+                        publish(folder, confirmed, 0, f'Printing: {confirmed}/{len(pages)} labels confirmed.' if kind == 'progress' else f'{confirmed}/{len(pages)} labels confirmed; finalizing job.')
                         if kind == 'completed':
                             completed = count == len(pages)
+                    elif kind == 'status':
+                        if event.get('lidClosed') is False:
+                            publish(folder, confirmed, 1, 'Last observed: printer lid open.')
+                        elif event.get('paperInserted') is False:
+                            publish(folder, confirmed, 2, 'Last observed: paper not detected. Check the feed path.')
+                        elif event.get('paperRfidSuccess') is False:
+                            publish(folder, confirmed, 3, 'Last observed: roll RFID tag could not be read.')
+                        elif all(event.get(k) is True for k in ('lidClosed','paperInserted','paperRfidSuccess')):
+                            publish(folder, confirmed, 0, f'Printing: {confirmed}/{len(pages)} labels confirmed.')
                     elif kind == 'error':
                         failed = True
+                        reason, message = error_status(event)
+                        publish(folder, confirmed, reason, message)
                         (folder/'error.txt').write_text(str(event.get('message', 'Unknown printer error')))
                     print(row.decode(), flush=True)
         code = child.wait(timeout=3)
         if cancelled or code != 0 or failed or not completed or buffer:
             raise RuntimeError('Job did not confirm successful physical completion; inspect printer before retrying')
         record('completed')
+        publish(folder, confirmed, 0, f'Completed: {confirmed}/{len(pages)} labels confirmed by printer.')
         return 0
-    except BaseException:
+    except BaseException as error:
+        if not failed:
+            publish(folder, confirmed, 8 if cancelled else 7, f'{error}; {confirmed}/{len(pages)} labels confirmed.')
         stop_group(child)
         record('failed-before-transmission' if child is None or (failed and not transmitted) else 'uncertain')
         raise
@@ -180,5 +199,7 @@ if __name__ == '__main__':
             path = Path(sys.argv[1])/'error.txt'
             if not path.exists():
                 path.write_text(str(error))
+            if not (path.parent/'status.txt').exists():
+                publish(path.parent, 0, 6 if 'acknowledge' in str(error) else 7, str(error))
         print(json.dumps({'version': 1, 'type': 'error', 'message': str(error)}), flush=True)
         sys.exit(1)

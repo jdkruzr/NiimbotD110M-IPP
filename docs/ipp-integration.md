@@ -48,10 +48,8 @@ page events). The initial nine local regression tests passed; see the safety add
 `-Wall -Wextra`. A separate fake service uses NIIMBOT_FAKE=1 and
 NIIMBOT_PORT=8632; never enable fake mode on the live service.
 
-Development limitations still requiring work: live error/status mapping,
-additional hardware failure qualification,
-IPP progress counters (PAPPL counts raster processing before physical
-completion), release packaging and notices audit, application-dialog test,
+Development limitations still requiring work: idle status refresh, additional hardware failure qualification,
+the PAPPL preparation-counter window described below, release packaging and notices audit, application-dialog test,
 and a label-specific self-test callback. Do not regard this as a fully
 qualified unattended print service yet.
 
@@ -141,4 +139,53 @@ late-cancel behavior remain conservatively classified as uncertain.
 
 Safety test evidence is saved locally in `artifacts/metadata/safety-*.log`.
 The development package is now `0.1.0~dev2`; installation/upgrade qualification
-and the broader status/reporting work remain separate tasks.
+and idle status refresh remain separate tasks.
+
+## Status and physical progress
+
+During the transport phase, `job-impressions-completed` now follows the worker's
+validated, monotonically increasing physical page counter. Buffered raster pages
+are reset to zero before connecting. Partial failures retain their last confirmed
+count, and a full page count alone does not mean success: the worker must still
+acknowledge PrintEnd and exit successfully. Messages distinguish preparing,
+connecting, printing, finalizing, completion, and failures. Counts/messages are
+published together through an atomic private status snapshot, and updates emit
+IPP progress/state notifications. Confirmed counts also persist in the journal.
+
+PAPPL 1.4 internally increments counters during raster ingestion, before calling
+our page callbacks. We reset these using public accessors at page entry and at
+the transition to transport. A very short-lived raster count can therefore be
+observed during preparation; the preparation message explicitly says no labels
+are confirmed. Transport and terminal counts are physical confirmations. We do
+not patch PAPPL's private job structure or claim to eliminate that framework
+window.
+
+Known print error 1 maps to `cover-open`. Error 20 maps to `other` with an explicit
+roll RFID diagnostic, because it does not uniquely mean an empty roll. Heartbeat
+paper absence maps to `media-needed`; connection failures/link loss map to
+`offline`. Recovery holds and unknown faults map to `other`. The suspected feed
+flag 0x08 remains unmapped. Error messages preserve raw diagnostics for unknown
+codes. A successful subsequent job clears stale reasons.
+
+Printer reasons reflect the most recent observed job/heartbeat, not continuous
+idle Bluetooth polling. Changing the lid or roll while idle will not immediately
+refresh the cached reason. The service releases Bluetooth between jobs so the
+phone can still connect. Detailed messages are job-state-message; PAPPL may
+still label the idle queue itself "Idle" even when its reason contains a fault.
+
+The live status test showed 0 during transmission, 1 only after confirmation,
+and completed only after final acknowledgement. It also exposed a CUPS 2.4
+copy-forwarding issue for PNG passthrough: the generated driverless PPD has
+`cupsManualCopies: True`, but sends PNG without a filter to expand copies, so
+`lp -n 2 image.png` forwarded copies=1. This is not a two-copy qualification.
+Use a label-sized PDF through CUPS for multiple copies; direct IPP PNG copies
+are expanded by PAPPL. Repairing the CUPS PNG passthrough behavior remains a
+separate compatibility task; do not multiply copies in the worker, which would
+double already-expanded raster jobs.
+
+Status/progress validation: 17 Python and 9 Node tests passed (26 total), including
+zero confirmed labels while stalled, a retained count of one after a two-label
+job fails, cover-open mapping, and clearing an offline reason after a successful
+job. The live sampled CUPS job reached 0 -> 1 -> completed. A physical cover-open
+check through this new status path is pending user readiness; the corresponding
+fake IPP test passes. The development package is `0.1.0~dev3`.

@@ -14,10 +14,38 @@
 
 static char recovery_path[1024];
 
-typedef struct { FILE *file; unsigned rows, pages; bool failed; char dir[256]; } job_data;
+typedef struct { FILE *file; unsigned rows, pages, confirmed; bool failed; unsigned reason; char status_message[512]; char dir[256]; } job_data;
+/* PAPPL 1.4 counts raster ingestion; physical progress belongs to our worker. */
+static void set_confirmed(pappl_job_t *job, unsigned count) {
+ papplJobSetImpressionsCompleted(job,(int)count-papplJobGetImpressionsCompleted(job));
+}
+#define OUR_REASONS (PAPPL_PREASON_COVER_OPEN|PAPPL_PREASON_MEDIA_EMPTY|PAPPL_PREASON_MEDIA_NEEDED|PAPPL_PREASON_OFFLINE|PAPPL_PREASON_OTHER)
+static void update_status(pappl_job_t *job, job_data *s) {
+ char path[300],message[512];unsigned version,count,reason;
+ snprintf(path,sizeof(path),"%s/status.txt",s->dir);
+ FILE *f=fopen(path,"r");if(!f)return;
+ bool valid=fscanf(f,"%u %u %u\n",&version,&count,&reason)==3 && fgets(message,sizeof(message),f);
+ fclose(f);
+ if(!valid || version!=1 || count<s->confirmed || count>s->pages || reason>8)return;
+ message[strcspn(message,"\r\n")]=0;
+ bool changed=s->confirmed!=count || s->reason!=reason || strcmp(s->status_message,message);
+ s->confirmed=count;s->reason=reason;snprintf(s->status_message,sizeof(s->status_message),"%s",message);set_confirmed(job,count);
+ pappl_preason_t flag=PAPPL_PREASON_NONE;
+ switch(reason){
+  case 1:flag=PAPPL_PREASON_COVER_OPEN;break;
+  case 2:flag=PAPPL_PREASON_MEDIA_NEEDED;break;
+  case 3:case 6:case 7:flag=PAPPL_PREASON_OTHER;break;
+  case 4:case 5:flag=PAPPL_PREASON_OFFLINE;break;
+ }
+ papplPrinterSetReasons(papplJobGetPrinter(job),flag,OUR_REASONS);
+ papplJobSetMessage(job,"%s",message);
+ if(changed){pappl_printer_t *printer=papplJobGetPrinter(job);papplSystemAddEvent(papplPrinterGetSystem(printer),printer,job,PAPPL_EVENT_JOB_PROGRESS|PAPPL_EVENT_PRINTER_STATE_CHANGED,NULL);}
+}
 static bool start_job(pappl_job_t *j, pappl_pr_options_t *o, pappl_device_t *d) {
  (void)o;(void)d;
- if(access(recovery_path,F_OK)==0){papplJobSetMessage(j,"Service previously exited unexpectedly; cancel old CUPS jobs and explicitly clear the recovery hold.");return false;}
+ set_confirmed(j,0);
+ papplJobSetMessage(j,"Preparing raster; no labels confirmed.");
+ if(access(recovery_path,F_OK)==0){papplPrinterSetReasons(papplJobGetPrinter(j),PAPPL_PREASON_OTHER,OUR_REASONS);papplJobSetMessage(j,"Service previously exited unexpectedly; cancel old CUPS jobs and explicitly clear the recovery hold.");return false;}
  job_data *s=calloc(1,sizeof(*s)); if(!s)return false;
  snprintf(s->dir,sizeof(s->dir),"/tmp/niimbot-job-XXXXXX");
  if(!mkdtemp(s->dir)){free(s);return false;}
@@ -25,6 +53,7 @@ static bool start_job(pappl_job_t *j, pappl_pr_options_t *o, pappl_device_t *d) 
 }
 static bool start_page(pappl_job_t *j,pappl_pr_options_t *o,pappl_device_t *d,unsigned page) {
  (void)d;(void)page;job_data *s=papplJobGetData(j);
+ set_confirmed(j,0);
  if((o->header.cupsWidth<95 || o->header.cupsWidth>96) || (o->header.cupsHeight<319 || o->header.cupsHeight>320) || o->header.cupsBitsPerPixel!=1 || ++s->pages>100){s->failed=true;return false;}
  char name[300];snprintf(name,sizeof(name),"%s/%u.raw",s->dir,s->pages);
  s->file=fopen(name,"wb");s->rows=0;if(!s->file)s->failed=true;return s->file!=NULL;
@@ -44,6 +73,9 @@ static bool end_page(pappl_job_t *j,pappl_pr_options_t *o,pappl_device_t *d,unsi
 static bool end_job(pappl_job_t *j,pappl_pr_options_t *o,pappl_device_t *d) {
  (void)o;(void)d;job_data *s=papplJobGetData(j);
  if(!s)return false;
+ set_confirmed(j,0);
+ papplJobSetImpressions(j,(int)s->pages);
+ papplJobSetCopiesCompleted(j,-papplJobGetCopiesCompleted(j));
  bool ok=false;
  if(!s->failed && !papplJobIsCanceled(j) && papplJobGetState(j)==IPP_JSTATE_PROCESSING) {
   char copies[16];snprintf(copies,sizeof(copies),"1"); /* PAPPL images/CUPS raster already expand copies. */
@@ -58,6 +90,7 @@ static bool end_job(pappl_job_t *j,pappl_pr_options_t *o,pappl_device_t *d) {
    struct timespec now;clock_gettime(CLOCK_MONOTONIC,&now);
    time_t until=now.tv_sec+35+30*s->pages,stop_at=0;
    while(true){
+    update_status(j,s);
     pid_t result=waitpid(pid,&status,WNOHANG);
     if(result==pid){reaped=true;break;}
     if(result<0){if(errno==EINTR)continue;break;}
@@ -68,15 +101,19 @@ static bool end_job(pappl_job_t *j,pappl_pr_options_t *o,pappl_device_t *d) {
     if(stopping&&now.tv_sec>=stop_at)kill(pid,SIGKILL);
     usleep(100000);
    }
+   update_status(j,s);
    ok=reaped&&!stopping&&!papplJobIsCanceled(j)&&WIFEXITED(status)&&WEXITSTATUS(status)==0;
   }
  }
+ if(ok){set_confirmed(j,s->pages);papplJobSetCopiesCompleted(j,papplJobGetCopies(j));}
  if(!ok){
  char error_path[300],message[512]="Job failed or cancelled; output may be partial. Check service log before explicitly resubmitting.";
  snprintf(error_path,sizeof(error_path),"%s/error.txt",s->dir);FILE *error=fopen(error_path,"r");if(error){if(!fgets(message,sizeof(message),error)){}fclose(error);unlink(error_path);}
- papplJobSetMessage(j,"%s",message);papplJobSetReasons(j,PAPPL_JREASON_ERRORS_DETECTED,PAPPL_JREASON_NONE);
+ if(s->confirmed==0)papplJobSetMessage(j,"%s",message);
+ update_status(j,s);
+ papplJobSetReasons(j,PAPPL_JREASON_ERRORS_DETECTED,PAPPL_JREASON_NONE);
  }
- if(s){if(s->file)fclose(s->file);for(unsigned p=1;p<=s->pages;p++){char n[300];snprintf(n,sizeof(n),"%s/%u.raw",s->dir,p);unlink(n);}char n[300];snprintf(n,sizeof(n),"%s/manifest.json",s->dir);unlink(n);rmdir(s->dir);free(s);papplJobSetData(j,NULL);}return ok;
+ if(s){if(s->file)fclose(s->file);for(unsigned p=1;p<=s->pages;p++){char n[300];snprintf(n,sizeof(n),"%s/%u.raw",s->dir,p);unlink(n);}char n[300];snprintf(n,sizeof(n),"%s/manifest.json",s->dir);unlink(n);snprintf(n,sizeof(n),"%s/status.txt",s->dir);unlink(n);snprintf(n,sizeof(n),"%s/status.tmp",s->dir);unlink(n);rmdir(s->dir);free(s);papplJobSetData(j,NULL);}return ok;
 }
 
 static bool driver(pappl_system_t *sys,const char *name,const char *uri,const char *id,pappl_pr_driver_data_t *v,ipp_t **attrs,void *data) {

@@ -21,10 +21,14 @@ async function main() {
   pages.push({encoded:await ImageEncoder.encodeImage(sharp(bytes,{raw:{width:96,height:320,channels:1}}),PageColorType.SingleColor,'top'),quantity:1});
  }
  if (process.env.NIIMBOT_FAKE === '1') {
-  const scenario=process.env.NIIMBOT_FAKE_SCENARIO || 'success';
+  const scenario=process.env.NIIMBOT_FAKE_SCENARIO_FILE ? fs.readFileSync(process.env.NIIMBOT_FAKE_SCENARIO_FILE,'utf8').trim() : process.env.NIIMBOT_FAKE_SCENARIO || 'success';
   emit('connected',{simulated:true});
-  if(scenario==='offline') throw Error('Simulated connection failure');
+  if(scenario==='offline') throw Object.assign(Error('Simulated connection failure'),{category:'offline'});
   emit('transmitting',{simulated:true});
+  if(scenario==='cover') throw Object.assign(Error('CoverOpen'),{reasonId:1});
+  if(scenario==='rfid') throw Object.assign(Error('WriteRfidFail'),{reasonId:20});
+  if(scenario==='unknown') throw Object.assign(Error('Unmapped printer error 8'),{reasonId:8});
+  if(scenario==='partial-link') {emit('progress',{confirmedPages:1}); await new Promise(r=>setTimeout(r,500)); throw Object.assign(Error('Simulated link loss'),{category:'link'});}
   if(scenario==='stall') await new Promise(()=>setInterval(()=>{},1000));
   if(scenario==='link-loss') { emit('progress',{confirmedPages:0}); throw Error('Simulated link loss'); }
   pages.forEach((_,i)=>emit('progress',{confirmedPages:i+1}));
@@ -38,10 +42,14 @@ async function main() {
   if(info.modelId!==2320 || info.printheadWidth!==96 || client.getPrintTaskType()!=='D110M_V4')
    throw Error('Printer profile mismatch');
   emit('connected');
+  client.on('heartbeat', e => {
+    const h=client.getHeartbeatData();
+    emit('status',{lidClosed:h.lidClosed,paperInserted:h.paperInserted,paperRfidSuccess:h.paperRfidSuccess});
+  });
   client.on('printprogress', e=>emit('progress',{confirmedPages:e.page}));
   emit('transmitting');
   await printImages(client,'D110M_V4',pages,{density:3,labelType:1});
   emit('completed',{confirmedPages:pages.length});
  } finally {if(client.isConnected()) await client.disconnect();}
 }
-main().catch(error=>{emit('error',{message:error.message});process.exitCode=1;});
+main().catch(error=>{emit('error',{message:error.message,reasonId:error.reasonId,category:error.category});process.exitCode=1;});
