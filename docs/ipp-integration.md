@@ -186,6 +186,8 @@ double already-expanded raster jobs.
 Status/progress validation: 17 Python and 9 Node tests passed (26 total), including
 zero confirmed labels while stalled, a retained count of one after a two-label
 job fails, cover-open mapping, and clearing an offline reason after a successful
-job. The live sampled CUPS job reached 0 -> 1 -> completed. A physical cover-open
-check through this new status path is pending user readiness; the corresponding
-fake IPP test passes. The development package is `0.1.0~dev3`.
+job. The live sampled CUPS job reached 0 -> 1 -> completed. The physical cover-open check also passed: printer error 1 rejected PrintStart,
+IPP reported cover-open, the job reached aborted with zero confirmed labels,
+and the job message instructed closing the lid and explicitly resubmitting.
+The test recovery hold was acknowledged without resubmitting. Evidence is in
+`artifacts/metadata/status-lid-job.log` and `status-lid-printer.log`. The development package is `0.1.0~dev3`.
