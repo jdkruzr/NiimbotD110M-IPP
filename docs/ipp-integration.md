@@ -231,7 +231,7 @@ and preservation of uncertain journals. Cached reasons can still age until
 another explicit refresh or job; the JSON output includes its observation time.
 
 The development package is now `0.1.0~dev4`. Installation/upgrade qualification
-and ordinary application-dialog testing remain pending.
+remains pending. Application-dialog results are recorded below.
 
 Validation for this checkpoint: 28 Python tests and 9 Node tests passed (37 total).
 The refresh tests were rerun with ResourceWarning treated as an error after
@@ -263,7 +263,16 @@ paper-size menu also offers A4/custom-size management on this system. Automated
 accessibility selection did not reliably commit the media choice, so that step
 was committed manually in the real dialog. The first application job reached
 the service as a 96×320 sGray raster with 12×40 mm media, but failed before
-printing with Host is down; an awake-printer retry is pending.
+printing with Host is down and confirmed zero labels.
 The retry dialog retained the manually chosen 12×40 mm stock, portrait,
 100% scale, and one copy. It displayed the printer-offline warning matching
-the failed connection. The user was asked to power on the printer before retry.
+the failed connection. The user powered on the printer before retry.
+
+After a read-only refresh confirmed lid closed, paper detected, and readable
+RFID, the same dialog submitted one copy successfully. PAPPL job 3 completed
+on 2026-11-12 at 12:55 PST with one printer-confirmed label and IPP
+`job-impressions-completed=1`; the queue returned to idle with no pending jobs.
+The user confirmed the text, border, arrow, bottom markers, and feed looked
+exactly as expected. Evidence is saved locally in
+`artifacts/metadata/dialog-retry-live.log`. This qualifies the submission path
+from Papers 50.2 through the GNOME portal; other applications remain untested.
