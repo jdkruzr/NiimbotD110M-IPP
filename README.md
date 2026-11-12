@@ -34,3 +34,6 @@ Extracted APKs, decompiled vendor code, packet captures, downloaded tooling,
 and build artifacts are deliberately excluded from Git. They remain local;
 the repository contains the implementation, fixtures, reproducible patches,
 and research findings.
+
+For a read-only lid/paper/RFID refresh, run `./scripts/niimbot-status`.
+Queue setup applies the CUPS 2.x PNG copy workaround; `lp -n 2` is hardware-tested.

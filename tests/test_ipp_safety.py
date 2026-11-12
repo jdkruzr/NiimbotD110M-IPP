@@ -120,4 +120,20 @@ STATUS successful-ok
         self.ipp('Get-Job-Attributes','ATTR integer job-id 2','EXPECT job-state WITH-VALUE 9 REPEAT-NO-MATCH REPEAT-LIMIT 5\nEXPECT job-impressions-completed WITH-VALUE 1')
         self.ipp('Get-Printer-Attributes',expect='EXPECT printer-state-reasons WITH-VALUE none')
 
+    def test_idle_status_refresh_updates_reasons_without_a_job(self):
+        state=self.base/'state/niimbot';state.mkdir(parents=True,exist_ok=True)
+        cache=state/'refresh-status.txt'
+        cache.write_text(f'1 {time.time_ns()} 1\nCover open\n')
+        self.ipp('Get-Printer-Attributes',expect='EXPECT printer-state-reasons WITH-VALUE cover-open REPEAT-NO-MATCH REPEAT-LIMIT 5')
+        cache.write_text(f'1 {time.time_ns()} 0\nReady\n')
+        self.ipp('Get-Printer-Attributes',expect='EXPECT printer-state-reasons WITH-VALUE none REPEAT-NO-MATCH REPEAT-LIMIT 5')
+        self.assertEqual(self.journals(),[])
+
+    def test_refresh_does_not_clear_service_recovery_hold(self):
+        (self.base/'recovery-required').touch()
+        state=self.base/'state/niimbot';state.mkdir(parents=True,exist_ok=True)
+        (state/'refresh-status.txt').write_text(f'1 {time.time_ns()} 0\nReady\n')
+        self.ipp('Get-Printer-Attributes',expect='EXPECT printer-state-reasons WITH-VALUE other REPEAT-NO-MATCH REPEAT-LIMIT 5')
+        self.assertTrue((self.base/'recovery-required').exists())
+
 if __name__=='__main__':unittest.main()

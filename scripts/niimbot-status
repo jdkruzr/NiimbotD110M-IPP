@@ -1,0 +1,10 @@
+#!/bin/bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+result=0
+python3 "$root/ipp/refresh.py" || result=$?
+# PAPPL throttles idle callbacks to one refresh per two seconds.
+sleep 2
+# Reading IPP attributes invokes the cache-only status callback.
+ipptool ipp://localhost:8631/ipp/print /usr/share/cups/ipptool/get-printer-attributes.test >/dev/null || result=$?
+exit "$result"

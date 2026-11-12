@@ -48,7 +48,7 @@ page events). The initial nine local regression tests passed; see the safety add
 `-Wall -Wextra`. A separate fake service uses NIIMBOT_FAKE=1 and
 NIIMBOT_PORT=8632; never enable fake mode on the live service.
 
-Development limitations still requiring work: idle status refresh, additional hardware failure qualification,
+Development limitations still requiring work: additional hardware failure qualification,
 the PAPPL preparation-counter window described below, release packaging and notices audit, application-dialog test,
 and a label-specific self-test callback. Do not regard this as a fully
 qualified unattended print service yet.
@@ -138,8 +138,7 @@ pending jobs. Physical link loss is therefore tested, while partial-output and
 late-cancel behavior remain conservatively classified as uncertain.
 
 Safety test evidence is saved locally in `artifacts/metadata/safety-*.log`.
-The development package is now `0.1.0~dev2`; installation/upgrade qualification
-and idle status refresh remain separate tasks.
+The development package is now `0.1.0~dev2`; installation/upgrade qualification remains a separate task.
 
 ## Status and physical progress
 
@@ -178,9 +177,8 @@ and completed only after final acknowledgement. It also exposed a CUPS 2.4
 copy-forwarding issue for PNG passthrough: the generated driverless PPD has
 `cupsManualCopies: True`, but sends PNG without a filter to expand copies, so
 `lp -n 2 image.png` forwarded copies=1. This is not a two-copy qualification.
-Use a label-sized PDF through CUPS for multiple copies; direct IPP PNG copies
-are expanded by PAPPL. Repairing the CUPS PNG passthrough behavior remains a
-separate compatibility task; do not multiply copies in the worker, which would
+Before the queue workaround below, label-sized PDFs were the tested multiple-copy path; direct IPP PNG copies
+are expanded by PAPPL. The CUPS PNG passthrough repair is documented below; do not multiply copies in the worker, which would
 double already-expanded raster jobs.
 
 Status/progress validation: 17 Python and 9 Node tests passed (26 total), including
@@ -191,3 +189,54 @@ IPP reported cover-open, the job reached aborted with zero confirmed labels,
 and the job message instructed closing the lid and explicitly resubmitting.
 The test recovery hold was acknowledged without resubmitting. Evidence is in
 `artifacts/metadata/status-lid-job.log` and `status-lid-printer.log`. The development package is `0.1.0~dev3`.
+
+## PNG copies and explicit idle refresh
+
+The PNG copy-forwarding issue above is now resolved for the installed CUPS 2.4
+queue. Setup still starts from CUPS's generated driverless PPD, then removes
+only its zero-cost PNG passthrough entry when `cupsManualCopies: True` is present.
+CUPS's existing image-to-raster pipeline now expands copies before submission.
+No new filter or protocol encoder is installed. A queue without a raster output
+filter is rejected; queues that support hardware copies are left unchanged.
+The generated PPD before adjustment is retained in the user's Niimbot state
+folder. Re-running setup reapplies the adjustment after regenerating the queue.
+This is a CUPS 2.x compatibility workaround, not a portable CUPS 3 driver design.
+
+Fake-queue checks passed for PNG copies=1 and copies=2, plus a two-page PDF with
+two collated copies (four pages). On hardware, `lp -n 2` produced two complete
+labels and the user confirmed identical test patterns. JPEG passthrough is
+intentionally unchanged: removing it exposed a separate system image-to-PDF
+failure for the test JPEG, so JPEG multi-copy support is not qualified.
+
+Refresh printer sensors without printing:
+
+```
+./scripts/niimbot-status
+```
+
+The command connects once, sends only the known handshake and advanced heartbeat
+query, validates framing/checksums, reads lid/paper/RFID state, and disconnects.
+It shares both the supervisor lock and per-address transport lock, and refuses
+to query while printing. It writes a timestamped atomic snapshot, then asks IPP
+to reread the cache after PAPPL's idle-status throttle. Ordinary IPP requests
+remain cache-only; they do not wake or occupy the printer's Bluetooth connection.
+A newer job observation supersedes an older refresh. An uncertain-job or
+unclean-service recovery hold is never cleared by healthy sensor readings.
+
+Live refresh reported lid closed, paper detected, and readable roll RFID, with
+no print/feed/reset commands. Synthetic IPP tests cover open-to-closed reason
+updates without creating jobs and preserving recovery holds. Unit tests cover
+fragmented replies, bad checksums, short heartbeats, print/refresh exclusion,
+and preservation of uncertain journals. Cached reasons can still age until
+another explicit refresh or job; the JSON output includes its observation time.
+
+The development package is now `0.1.0~dev4`. Installation/upgrade qualification
+and ordinary application-dialog testing remain pending.
+
+Validation for this checkpoint: 28 Python tests and 9 Node tests passed (37 total).
+The refresh tests were rerun with ResourceWarning treated as an error after
+making lock-file cleanup explicit. Hardware evidence is in
+`artifacts/metadata/refresh-live-closed.json` and
+`artifacts/metadata/copies-refresh-live-service.log`; the fake CUPS trace is
+`artifacts/metadata/copies-fake-cups.log`. The user confirmed two identical
+physical test-pattern labels from the repaired PNG queue.

@@ -11,8 +11,10 @@
 #include <sys/prctl.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <stdatomic.h>
 
-static char recovery_path[1024];
+static char recovery_path[1024], refresh_path[1024];
+static _Atomic unsigned long long latest_observation;
 
 typedef struct { FILE *file; unsigned rows, pages, confirmed; bool failed; unsigned reason; char status_message[512]; char dir[256]; } job_data;
 /* PAPPL 1.4 counts raster ingestion; physical progress belongs to our worker. */
@@ -20,6 +22,28 @@ static void set_confirmed(pappl_job_t *job, unsigned count) {
  papplJobSetImpressionsCompleted(job,(int)count-papplJobGetImpressionsCompleted(job));
 }
 #define OUR_REASONS (PAPPL_PREASON_COVER_OPEN|PAPPL_PREASON_MEDIA_EMPTY|PAPPL_PREASON_MEDIA_NEEDED|PAPPL_PREASON_OFFLINE|PAPPL_PREASON_OTHER)
+static pappl_preason_t reason_flag(unsigned reason) {
+ switch(reason){
+  case 1:return PAPPL_PREASON_COVER_OPEN;
+  case 2:return PAPPL_PREASON_MEDIA_NEEDED;
+  case 3:case 6:case 7:return PAPPL_PREASON_OTHER;
+  case 4:case 5:return PAPPL_PREASON_OFFLINE;
+  default:return PAPPL_PREASON_NONE;
+ }
+}
+/* This callback reads a user-requested snapshot; it never opens Bluetooth. */
+static bool cached_status(pappl_printer_t *printer) {
+ if(access(recovery_path,F_OK)==0){papplPrinterSetReasons(printer,PAPPL_PREASON_OTHER,OUR_REASONS);return true;}
+ FILE *file=fopen(refresh_path,"r");if(!file)return true;
+ unsigned version,reason;unsigned long long observed;
+ bool valid=fscanf(file,"%u %llu %u",&version,&observed,&reason)==3;
+ fclose(file);
+ if(!valid || version!=1 || reason>8 || observed<=atomic_load(&latest_observation))return true;
+ papplPrinterSetReasons(printer,reason_flag(reason),OUR_REASONS);
+ atomic_store(&latest_observation,observed);
+ papplSystemAddEvent(papplPrinterGetSystem(printer),printer,NULL,PAPPL_EVENT_PRINTER_STATE_CHANGED,NULL);
+ return true;
+}
 static void update_status(pappl_job_t *job, job_data *s) {
  char path[300],message[512];unsigned version,count,reason;
  snprintf(path,sizeof(path),"%s/status.txt",s->dir);
@@ -30,14 +54,8 @@ static void update_status(pappl_job_t *job, job_data *s) {
  message[strcspn(message,"\r\n")]=0;
  bool changed=s->confirmed!=count || s->reason!=reason || strcmp(s->status_message,message);
  s->confirmed=count;s->reason=reason;snprintf(s->status_message,sizeof(s->status_message),"%s",message);set_confirmed(job,count);
- pappl_preason_t flag=PAPPL_PREASON_NONE;
- switch(reason){
-  case 1:flag=PAPPL_PREASON_COVER_OPEN;break;
-  case 2:flag=PAPPL_PREASON_MEDIA_NEEDED;break;
-  case 3:case 6:case 7:flag=PAPPL_PREASON_OTHER;break;
-  case 4:case 5:flag=PAPPL_PREASON_OFFLINE;break;
- }
- papplPrinterSetReasons(papplJobGetPrinter(job),flag,OUR_REASONS);
+ papplPrinterSetReasons(papplJobGetPrinter(job),reason_flag(reason),OUR_REASONS);
+ if(changed){struct timespec observed;clock_gettime(CLOCK_REALTIME,&observed);atomic_store(&latest_observation,(unsigned long long)observed.tv_sec*1000000000ULL+observed.tv_nsec);}
  papplJobSetMessage(job,"%s",message);
  if(changed){pappl_printer_t *printer=papplJobGetPrinter(job);papplSystemAddEvent(papplPrinterGetSystem(printer),printer,job,PAPPL_EVENT_JOB_PROGRESS|PAPPL_EVENT_PRINTER_STATE_CHANGED,NULL);}
 }
@@ -119,6 +137,7 @@ static bool end_job(pappl_job_t *j,pappl_pr_options_t *o,pappl_device_t *d) {
 static bool driver(pappl_system_t *sys,const char *name,const char *uri,const char *id,pappl_pr_driver_data_t *v,ipp_t **attrs,void *data) {
  (void)sys;(void)name;(void)uri;(void)id;(void)attrs;(void)data;
  snprintf(v->make_and_model,sizeof(v->make_and_model),"Niimbot D110M");
+ v->status_cb=cached_status;
  v->rstartjob_cb=start_job;v->rstartpage_cb=start_page;v->rwriteline_cb=line;v->rendpage_cb=end_page;v->rendjob_cb=end_job;
  v->ppm=10;v->format="application/x-niimbot-disabled";
  v->num_resolution=1;v->x_resolution[0]=v->y_resolution[0]=v->x_default=v->y_default=203;
@@ -133,6 +152,9 @@ static bool driver(pappl_system_t *sys,const char *name,const char *uri,const ch
 static bool device_open(pappl_device_t *d,const char *u,const char *n){(void)d;(void)u;(void)n;return true;}
 static void device_close(pappl_device_t *d){(void)d;}
 int main(void) {
+ const char *state=getenv("XDG_STATE_HOME"),*home=getenv("HOME");
+ int length=state ? snprintf(refresh_path,sizeof(refresh_path),"%s/niimbot/refresh-status.txt",state) : snprintf(refresh_path,sizeof(refresh_path),"%s/.local/state/niimbot/refresh-status.txt",home?home:"");
+ if(length<0 || length>=(int)sizeof(refresh_path))return 1;
  pappl_pr_driver_t drivers[]={{"niimbot-d110m","Niimbot D110M 12x40 mm",NULL,NULL}};
  const char *spool=getenv("NIIMBOT_SPOOL");if(!spool){fprintf(stderr,"Set NIIMBOT_SPOOL to a private directory\n");return 1;}
  papplDeviceAddScheme("niimbot",PAPPL_DEVTYPE_CUSTOM_LOCAL,NULL,device_open,device_close,NULL,NULL,NULL,NULL);

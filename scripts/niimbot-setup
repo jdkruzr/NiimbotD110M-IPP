@@ -17,6 +17,8 @@ Description=Local Niimbot D110M IPP service
 WorkingDirectory=$root
 Environment=NIIMBOT_SPOOL=$state/spool
 Environment=NIIMBOT_NODE=$node_binary
+Environment="XDG_STATE_HOME=${state%/niimbot}"
+Environment="XDG_CONFIG_HOME=$config"
 ExecStart=$root/ipp/niimbot-ipp
 UMask=0077
 KillMode=control-group
@@ -31,3 +33,13 @@ for attempt in {1..30}; do
  sleep 0.2
 done
 lpadmin -p Niimbot_D110M -E -v ipp://localhost:8631/ipp/print -m everywhere -o printer-error-policy=stop-printer -o printer-is-shared=false -o PageSize=12x40mm.Borderless
+
+# Work around CUPS image passthrough dropping copies on ManualCopies queues.
+ppd_dir=$(mktemp -d)
+trap 'rm -rf "$ppd_dir"' EXIT
+curl --fail --silent --show-error http://localhost:631/printers/Niimbot_D110M.ppd -o "$ppd_dir/original.ppd"
+python3 "$root/scripts/fix-cups-image-copies.py" "$ppd_dir/original.ppd" "$ppd_dir/fixed.ppd"
+if ! cmp -s "$ppd_dir/original.ppd" "$ppd_dir/fixed.ppd"; then
+  cp "$ppd_dir/original.ppd" "$state/queue-before-image-copy-fix.ppd"
+  lpadmin -p Niimbot_D110M -P "$ppd_dir/fixed.ppd"
+fi
