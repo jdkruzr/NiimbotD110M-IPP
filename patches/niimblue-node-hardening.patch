@@ -1,0 +1,118 @@
+diff --git a/src/cli/worker.ts b/src/cli/worker.ts
+index 2412ec5..d7aed38 100644
+--- a/src/cli/worker.ts
++++ b/src/cli/worker.ts
+@@ -164,7 +164,14 @@ export const cliConnectAndPrintImageFile = async (paths: string[], options: Prin
+     console.error("Error printing:", err instanceof Error ? err.message : err);
+     status = 1;
+   } finally {
+-    await client.disconnect();
++    if (client.isConnected()) {
++      try {
++        await client.disconnect();
++      } catch (err) {
++        console.error("Error disconnecting:", err instanceof Error ? err.message : err);
++        status = 1;
++      }
++    }
+   }
+ 
+   process.exit(status);
+diff --git a/src/utils.ts b/src/utils.ts
+index 07cf85c..01ff80b 100644
+--- a/src/utils.ts
++++ b/src/utils.ts
+@@ -1,3 +1,4 @@
++import { runBoundedJob, pollPages } from "./job-control";
+ import {
+   AbstractPrintTask,
+   EncodedImage,
+@@ -110,18 +111,31 @@ export const printImages = async (
+     pageColor,
+   });
+ 
+-  try {
++  if (!Number.isSafeInteger(totalPages) || totalPages < 1 || totalPages > 65535 ||
++      resolvedPages.some(p => !Number.isSafeInteger(p.quantity) || p.quantity < 1)) {
++    throw new Error("Invalid page quantity");
++  }
++  await runBoundedJob(30_000 * totalPages, async (signal) => {
++    signal.throwIfAborted();
+     await printTask.printInit();
+-
+     for (const page of resolvedPages) {
++      signal.throwIfAborted();
+       await printTask.printPage(page.encoded, page.quantity);
++      signal.throwIfAborted();
+       await printTask.waitForPageFinished();
+     }
+-
+-    await printTask.waitForFinished();
+-  } finally {
++    if (printTaskName === "D110M_V4") {
++      await pollPages(signal, totalPages, async () => {
++        const status = await client.protocol.getPrintStatus(1);
++        client.emit("printprogress", new PrintProgressEvent(status.page, totalPages, status.pagePrintProgress, status.pageFeedProgress));
++        return status;
++      });
++    } else {
++      await printTask.waitForFinished();
++    }
++    signal.throwIfAborted();
+     await printTask.printEnd();
+-  }
++  }, () => client.disconnect());
+ };
+ 
+ export const loadImageFromBase64 = async (b64: string): Promise<Sharp> => {
+diff --git a/src/job-control.ts b/src/job-control.ts
+new file mode 100644
+index 0000000..467ab8c
+--- /dev/null
++++ b/src/job-control.ts
+@@ -0,0 +1,45 @@
++/** One active physical job per process. Fail closed on uncertain completion. */
++let active = false;
++export async function runBoundedJob<T>(milliseconds: number, work: (signal: AbortSignal) => Promise<T>, disconnect: () => Promise<void>): Promise<T> {
++  if (active) throw new Error('A print job is already active');
++  if (!Number.isFinite(milliseconds) || milliseconds <= 0) throw new Error('Invalid job deadline');
++  active = true;
++  const controller = new AbortController();
++  let timer: ReturnType<typeof setTimeout> | undefined;
++  const cancel = () => controller.abort(new Error('Print cancelled; physical completion UNKNOWN; do not automatically retry'));
++  process.once('SIGINT', cancel);
++  process.once('SIGTERM', cancel);
++  const cancelled = new Promise<never>((_, reject) => {
++    controller.signal.addEventListener('abort', () => reject(controller.signal.reason), {once: true});
++    timer = setTimeout(() => controller.abort(new Error('Print deadline exceeded; physical completion UNKNOWN; do not automatically retry')), milliseconds);
++  });
++  const operation = Promise.resolve().then(() => work(controller.signal));
++  try {
++    return await Promise.race([operation, cancelled]);
++  } catch (error) {
++    controller.abort(error);
++    await disconnect().catch(() => undefined);
++    throw error;
++  } finally {
++    clearTimeout(timer);
++    process.removeListener('SIGINT', cancel);
++    process.removeListener('SIGTERM', cancel);
++    // Keep the process locked until any in-flight work has actually settled.
++    void operation.finally(() => { active = false; }).catch(() => undefined);
++  }
++}
++
++export async function pollPages(signal: AbortSignal, pages: number, read: () => Promise<{page: number}>, interval = 500): Promise<void> {
++  while (true) {
++    signal.throwIfAborted();
++    const status = await read();
++    signal.throwIfAborted();
++    if (status.page >= pages) return;
++    await new Promise<void>((resolve, reject) => {
++      const abort = () => { clearTimeout(timer); reject(signal.reason); };
++      const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, interval);
++      signal.addEventListener('abort', abort, {once: true});
++      if (signal.aborted) abort();
++    });
++  }
++}

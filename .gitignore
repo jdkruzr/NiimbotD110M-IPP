@@ -1,0 +1,10 @@
+# Local app research and upstream checkouts are not publication source.
+artifacts/
+decompiled/
+research/
+node_modules/
+__pycache__/
+tools/
+
+# Compiled local service
+ipp/niimbot-ipp

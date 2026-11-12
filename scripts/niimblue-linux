@@ -1,0 +1,6 @@
+#!/bin/sh
+# Use the desktop BlueZ service instead of requiring raw HCI privileges.
+set -eu
+workspace=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+export NOBLE_BINDINGS=dbus
+exec node "$workspace/research/niimblue-node/cli.mjs" "$@"

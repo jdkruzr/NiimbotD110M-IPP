@@ -1,0 +1,15 @@
+#!/bin/bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+source_dir="$root/research/niimblue-node"
+if [[ -e "$source_dir" ]]; then
+  echo "Existing checkout preserved: $source_dir" >&2
+  echo 'Bootstrap requires a fresh checkout; see docs/qualification-status.md.' >&2
+  exit 1
+fi
+mkdir -p "$root/research"
+git clone https://github.com/MultiMote/niimblue-node.git "$source_dir"
+git -C "$source_dir" checkout --detach e7340dfad69b6aab1c05d2589ca012a7c0ed6313
+git -C "$source_dir" apply "$root/patches/niimblue-node-bluez.patch" "$root/patches/niimblue-node-hardening.patch"
+(cd "$source_dir" && npm ci && npm run build)
+make -C "$root/ipp"

@@ -1,0 +1,31 @@
+#!/bin/bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+state="${XDG_STATE_HOME:-$HOME/.local/state}/niimbot"
+config="${XDG_CONFIG_HOME:-$HOME/.config}"
+mkdir -p "$state/spool" "$config/systemd/user" "$config/niimbot"
+chmod 700 "$state" "$state/spool" "$config/niimbot"
+if [ ! -f "$config/niimbot/config.json" ]; then
+  echo 'Create ~/.config/niimbot/config.json with address and SDP channel before setup.' >&2
+  exit 1
+fi
+cat > "$config/systemd/user/niimbot-ipp.service" <<UNIT
+[Unit]
+Description=Local Niimbot D110M IPP service
+[Service]
+WorkingDirectory=$root
+Environment=NIIMBOT_SPOOL=$state/spool
+ExecStart=$root/ipp/niimbot-ipp
+UMask=0077
+KillMode=control-group
+TimeoutStopSec=5
+[Install]
+WantedBy=default.target
+UNIT
+systemctl --user daemon-reload
+systemctl --user enable --now niimbot-ipp.service
+for attempt in {1..30}; do
+ if ipptool ipp://localhost:8631/ipp/print /usr/share/cups/ipptool/get-printer-attributes.test >/dev/null 2>&1; then break; fi
+ sleep 0.2
+done
+lpadmin -p Niimbot_D110M -E -v ipp://localhost:8631/ipp/print -m everywhere -o printer-error-policy=stop-printer -o printer-is-shared=false -o PageSize=12x40mm.Borderless
